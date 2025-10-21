@@ -243,7 +243,7 @@ class Creature:
         self.flash_timer = 0.8
         caller.flash_timer = 0.8
         self.heart_pulse_timer = 1.2
-        caller.heart_pulse_timer = 1.2f
+        caller.heart_pulse_timer = 1.2
 
         # both creatures head back toward their nests immediately
         self_nest = nests.get_nest(self)
