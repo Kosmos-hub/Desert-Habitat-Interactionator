@@ -13,14 +13,17 @@ class ScentField:
     def __init__(self, width, height):
         self.width = width
         self.height = height
+        self.cell_size = CELL_SIZE
         self.cols = width // CELL_SIZE
         self.rows = height // CELL_SIZE
 
         # scent layers for each type
         self.maps = {
-            "food": np.zeros((self.rows, self.cols), dtype=np.float32),
-            "pred": np.zeros((self.rows, self.cols), dtype=np.float32),
-            "prey": np.zeros((self.rows, self.cols), dtype=np.float32),
+        "food": np.zeros((self.rows, self.cols), dtype=np.float32),
+        "pred": np.zeros((self.rows, self.cols), dtype=np.float32),
+        "prey": np.zeros((self.rows, self.cols), dtype=np.float32),
+        "toxin": np.zeros((self.rows, self.cols), dtype=np.float32),
+        "corpse": np.zeros((self.rows, self.cols), dtype=np.float32),  # NEW
         }
 
         # pre-blurred visualization surface
@@ -47,7 +50,8 @@ class ScentField:
             + grid[1:-1, 2:]
             - 4 * grid[1:-1, 1:-1]
         )
-        new_grid *= (1.0 - DECAY_RATE)
+        decay = DECAY_RATE * (0.4 if grid is self.maps.get("corpse") else 1.0)
+        new_grid *= (1.0 - decay)
         np.clip(new_grid, 0, 1.0, out=new_grid)
         return new_grid
 
@@ -76,14 +80,11 @@ class ScentField:
         self.visual.fill((0, 0, 0, 0))
         px = pygame.surfarray.pixels_alpha(self.visual)
 
-        if n.type == "prey":
-            pygame.draw.circle(surf, (255, 60, 60), (int(n.x), int(n.y)), n.radius + 3, 2)
-
-
         for scent_type, color in {
             "food": (60, 180, 100),
             "prey": (80, 150, 255),
             "pred": (255, 80, 80),
+            "toxin": (150, 60, 200), 
         }.items():
             grid = self.maps[scent_type]
             # upscale scent grid to pixel map

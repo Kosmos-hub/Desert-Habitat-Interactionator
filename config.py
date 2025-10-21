@@ -3,7 +3,7 @@
 # ==================================================
 
 # Window settings
-WIDTH, HEIGHT = 1100, 700
+WIDTH, HEIGHT = 1200, 700
 FPS = 60
 
 # UI Colors
@@ -19,11 +19,20 @@ MAX_POP = 50
 # Mating system
 MATING_CALL_RANGE = 350
 MATE_DRIVE_RATE = 0.12
-CALL_COOLDOWN = 10.0
+CALL_COOLDOWN = 3.5
 CALL_DURATION = 4.0
 RESPONSE_CALL_DURATION = 3.0
 RESPONSE_COLOR_PREY = (255, 150, 255)   # pinkish
 RESPONSE_COLOR_PRED = (80, 255, 255)    # cyan
+
+# Decomposer system
+DECOMPOSER_BASE_SPEED = 40.0  # Slower than regular creatures
+CORPSE_ENERGY_MULTIPLIER = 0.7  # 70% of creature's max energy becomes corpse energy
+PLANT_SPAWN_ENERGY = 60.0  # Energy value of a full plant
+TOXIN_THRESHOLD = 0.6  # Escape priority needed to release toxin
+TOXIN_STRENGTH = 2.0  # How strong the toxin scent is
+TOXIN_DURATION = 8.0  # How long toxin scent lasts
+DECOMP_NEST_COLOR = (150, 60, 200) # purple
 
 # Home position
 HOME_POS = (WIDTH * 0.1, HEIGHT * 0.5)

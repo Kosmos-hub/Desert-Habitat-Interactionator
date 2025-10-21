@@ -35,7 +35,7 @@ No creature is directly scripted — their choices come from evolving genetics a
 
 ##  Key Parameters                        
                                           /\_/\
-                                       = (• . •) =
+                                        =(• . •)=
                                          /     \     
 - **Size** → affects digestion, energy storage, and visibility  
 - **Speed** → determines agility and energy cost per movement  

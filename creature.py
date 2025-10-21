@@ -39,22 +39,35 @@ class Creature:
             "size": random.uniform(0.6, 1.6),
             "speed": random.uniform(0.7, 1.4),
             "vision": random.uniform(60, 140),
-            "metabolism": random.uniform(0.6, 1.4) if genome and genome.get("aggression", 0) > 0.6 else random.uniform(0.8, 1.8),
+            "metabolism": random.uniform(0.6, 1.4),
             "aggression": random.uniform(0, 1),
+            "toxin": 0.0,
+            "is_decomposer": False,
         }
 
         # --- derived stats ---
         self.radius = BASE_RADIUS * self.genome["size"]
-        self.base_speed = CREATURE_BASE_SPEED * self.genome["speed"]
+        if self.genome.get("is_decomposer", False):
+            self.base_speed = DECOMPOSER_BASE_SPEED
+        else:
+            self.base_speed = CREATURE_BASE_SPEED * self.genome["speed"]
+        
+        # FIXED: Set energy_max and energy BEFORE other attributes
         self.energy_max = ENERGY_BASE_MAX * self.genome["size"]
         self.energy = random.uniform(0.6 * self.energy_max, self.energy_max)
 
         # --- nest reference ---
         self.last_scent_drop = 0.0
-        self.scent_type = "pred" if self.genome["aggression"] > 0.6 else "prey"
+        if self.genome.get("is_decomposer", False):
+            self.scent_type = "decomp"
+        elif self.genome["aggression"] > 0.6:
+            self.scent_type = "pred"
+        else:
+            self.scent_type = "prey"
         self.nest = None
         self.home_score = 0
         self.generation = 0
+        self.toxin_cooldown = 0.0
 
     @property
     def speed(self):
@@ -87,12 +100,12 @@ class Creature:
     # ==================================================
     #   UPDATE LOOP
     # ==================================================
-    def update(self, dt, foods, nests, creatures, generation, scent_field):
+    def update(self, dt, foods, nests, creatures, generation, scent_field, corpses):
         if not self.alive:
             return generation
 
         self.flash_timer = max(0.0, self.flash_timer - dt)
-        self.mate_drive = clamp(self.mate_drive + MATE_DRIVE_RATE * dt, 0.0, 0.9)
+        self.mate_drive = clamp(self.mate_drive + MATE_DRIVE_RATE * dt, 0.0, 1.0)
 
         # --- drop scent less often for performance ---
         self.last_scent_drop += dt
@@ -112,36 +125,65 @@ class Creature:
             if self.response_timer <= 0:
                 self.responding = False
 
+        # Toxin cooldown decrement:
+        if self.toxin_cooldown > 0:
+            self.toxin_cooldown -= dt
+
         # === behavioral decision ===
         behavior = self.decide_behavior(creatures, nests)
 
         if behavior == "escape":
-            self.prey_behavior(dt, creatures, foods, nests, scent_field)
+            # Check if decomposer
+            if self.genome.get("is_decomposer", False):
+                self.decomposer_escape(dt, creatures, nests, scent_field)
+            else:
+                self.prey_behavior(dt, creatures, foods, nests, scent_field)
         elif behavior == "gather":
-            if self.genome["aggression"] > 0.6:
+            if self.genome.get("is_decomposer", False):
+                self.decomposer_behavior(dt, corpses, foods, nests, scent_field)  # Need corpses!
+            elif self.genome["aggression"] > 0.6:
                 generation = self.predator_behavior(dt, creatures, foods, nests, scent_field, generation)
             else:
                 self.standard_food_cycle(dt, foods, nests)
         elif behavior == "mate":
+            # CHANGE: Break off mating if partner is invalid or too long without success
+            if self.partner and not self.partner.alive:
+                self.partner = None
+                self.heard_call = None
+            
+            # CHANGE: If we've been trying to mate for too long, give up and reset
+            if not hasattr(self, 'mate_attempt_timer'):
+                self.mate_attempt_timer = 0.0
+            
+            if self.partner:
+                self.mate_attempt_timer += dt
+                # Give up after 8 seconds of trying
+                if self.mate_attempt_timer > 8.0:
+                    if self.partner:
+                        self.partner.partner = None
+                        self.partner.heard_call = None
+                        self.partner.mate_attempt_timer = 0.0
+                    self.heard_call = None
+                    self.mate_attempt_timer = 0.0
+                    self.mate_drive *= 0.5  # Reduce drive to avoid immediate retry
+            else:
+                self.mate_attempt_timer = 0.0
+            
             # start calling immediately when top priority is mate
             if not self.calling and self.call_cooldown <= 0:
                 self.broadcast_call(creatures, nests)
-            # if both partners have heard each other → go to nest to mate
+            # if both partners have heard each other go to nest to mate
             if self.partner:
                 my_nest = nests.get_nest(self)
                 if my_nest and nests.can_enter(self, my_nest):
                     # always return to nest once partnered
                     if not my_nest.contains(self):
                         self.seek(my_nest.x, my_nest.y)
-                    else:
-                        self.courtship_behavior(dt, nests)
                 else:
                     # lost partner or invalid nest
                     self.partner = None
 
-            if self.partner:
-                self.courtship_behavior(dt, nests)
-            elif self.heard_call:
+            if self.heard_call:
                 self.seek(self.heard_call.x, self.heard_call.y)
                 self.neutral_behavior(dt, foods, nests)
             else:
@@ -149,12 +191,16 @@ class Creature:
             baby = self.try_mate(creatures, nests)
             if baby:
                 creatures.append(baby)
+                self.mate_attempt_timer = 0.0
         else:
             self.neutral_behavior(dt, foods, nests)
 
         # --- energy drain ---
         move_intensity = clamp(math.hypot(self.vx, self.vy), 0.0, 1.0)
-        drain = (ENERGY_IDLE_COST + ENERGY_MOVE_COST * move_intensity) * self.genome["metabolism"]
+        if self.genome.get("is_decomposer", False):
+            drain = (ENERGY_IDLE_COST + ENERGY_MOVE_COST * move_intensity) * self.genome["metabolism"] * 0.5
+        else:
+            drain = (ENERGY_IDLE_COST + ENERGY_MOVE_COST * move_intensity) * self.genome["metabolism"]
         self.energy -= drain * dt
 
         # passive digestion for predators
@@ -164,15 +210,62 @@ class Creature:
                 self.energy = clamp(self.energy + digest_rate, 0, self.energy_max)
             self.digest_timer -= dt
 
-        if self.energy <= 0:
-            self.alive = False
+        # Hibernation for decomposers
+        if self.genome.get("is_decomposer", False):
+            if self.energy <= self.energy_max * 0.15:
+                # slow hibernation drift, but still lose energy
+                self.vx *= 0.2
+                self.vy *= 0.2
+                self.ready_to_mate = False
+                self.flash_timer = 0.0
+                # die if truly starved
+                if self.energy <= 0:
+                    self.alive = False
+        # Hibernation for predators
+        elif self.genome["aggression"] > 0.6:
+            if self.energy <= self.energy_max * 0.2:
+                # predators enter deeper hibernation when starving
+                self.vx *= 0.15
+                self.vy *= 0.15
+                self.ready_to_mate = False
+                self.flash_timer = 0.0
+                # reduced metabolism during hibernation
+                self.genome["metabolism"] *= 0.7
+                # die if energy reaches zero
+                if self.energy <= 0:
+                    self.alive = False
+        else:
+            if self.energy <= 0:
+                self.alive = False
         return generation
+
 
     def decide_behavior(self, creatures, nests):
         """Determine priority behavior."""
         escape_p = self.get_escape_priority(creatures, nests)
         gather_p = self.get_gather_priority()
         mate_p = self.get_mate_priority(nests)
+
+        # Decomposers: prefer mating once full energy is reached
+        if self.genome.get("is_decomposer", False):
+            if self.energy >= self.energy_max * 0.9:
+                gather_p = 0.0
+                mate_p = 1.5
+
+        # CHANGE: If energy is critically low, force gathering regardless of other priorities
+        if self.energy < self.energy_max * 0.35:
+            gather_p = max(gather_p, 1.6)  # Override mating priority
+            # Break off partnership if starving
+            if self.partner:
+                partner = self.partner
+                self.partner = None
+                self.heard_call = None
+                partner.partner = None
+                partner.heard_call = None
+        
+        # NEW: Toxin release overrides other behaviors for decomposers
+        if self.genome.get("is_decomposer", False) and escape_p > TOXIN_THRESHOLD:
+            escape_p = 1.8  # Make escape highest priority when toxin triggers
 
         self.priorities = {
             "escape": escape_p,
@@ -202,24 +295,33 @@ class Creature:
             return 0.0
         return self.mate_drive
 
-
     def broadcast_call(self, creatures, nests):
-        """Emit a mating call inside nest."""
+        """Emit a visible mating call; if outside nest, start returning home."""
         if not self.ready_to_mate or not self.alive:
             return
         if self.partner:
-            return
-
+            return  # already paired
+        
         my_nest = nests.get_nest(self)
-        if not my_nest or not nests.can_enter(self, my_nest) or not my_nest.contains(self):
+        if not my_nest or not nests.can_enter(self, my_nest):
             return
 
+        # CHANGE: Predators can call from anywhere, don't require being home first
+        is_predator = self.genome["aggression"] > 0.6
+        
+        # if outside, begin heading home (but still send call)
+        if not my_nest.contains(self):
+            self.seek(my_nest.x, my_nest.y)
+
+        # resend call if cooldown expired
         if self.call_cooldown <= 0:
             self.calling = True
             self.call_timer = CALL_DURATION
-            self.call_cooldown = CALL_COOLDOWN
+            self.call_cooldown = 2.5 if is_predator else 3.5  # CHANGE: Predators call more frequently
 
-            call_range = 350 * (self.genome["vision"] / 100)
+            # CHANGE: Predators have longer range calls
+            call_range = 450 * (self.genome["vision"] / 100) if is_predator else 350 * (self.genome["vision"] / 100)
+            
             for c in creatures:
                 if c is self or not c.alive or not c.ready_to_mate:
                     continue
@@ -230,7 +332,7 @@ class Creature:
                     c.respond_to_call(self, nests)
 
     def respond_to_call(self, caller, nests):
-        """Send a response call and set partnership if both are ready."""
+        """Respond and start heading home immediately."""
         if not self.ready_to_mate or not self.alive or self.partner:
             return
         self.responding = True
@@ -238,6 +340,12 @@ class Creature:
         self.partner = caller
         caller.partner = self
 
+        my_nest = nests.get_nest(self)
+        if my_nest:
+            self.seek(my_nest.x, my_nest.y)
+        partner_nest = nests.get_nest(caller)
+        if partner_nest:
+            caller.seek(partner_nest.x, partner_nest.y)
 
         # heart pulse cue when partners agree to mate
         self.flash_timer = 0.8
@@ -254,44 +362,6 @@ class Creature:
             caller.seek(caller_nest.x, caller_nest.y)
 
 
-    def courtship_behavior(self, dt, nests):
-        """Partnered movement - synchronized orbit inside nest."""
-        if not self.partner or not self.partner.alive:
-            self.partner = None
-            return
-
-        my_nest = nests.get_nest(self)
-        if not my_nest or not nests.can_enter(self, my_nest):
-            self.partner = None
-            return
-
-        d = dist(self.x, self.y, self.partner.x, self.partner.y)
-        desired_dist = (self.radius + self.partner.radius) * 3.0
-
-        if d > desired_dist * 1.2:
-            self.seek(self.partner.x, self.partner.y)
-        elif d < desired_dist * 0.8:
-            away_x = self.x - self.partner.x
-            away_y = self.y - self.partner.y
-            nx, ny = norm(away_x, away_y)
-            self.vx, self.vy = 0.9 * self.vx + 0.1 * nx, 0.9 * self.vy + 0.1 * ny
-            self.vx, self.vy = norm(self.vx, self.vy)
-        else:
-            mid_x = (self.x + self.partner.x) / 2
-            mid_y = (self.y + self.partner.y) / 2
-            angle = math.atan2(self.y - mid_y, self.x - mid_x)
-            if id(self) % 2 == 0:
-                angle += 0.03
-            else:
-                angle -= 0.03
-            orbit_dist = desired_dist / 2
-            self.vx = math.cos(angle)
-            self.vy = math.sin(angle)
-            self.x = mid_x + orbit_dist * self.vx
-            self.y = mid_y + orbit_dist * self.vy
-
-        self.move(dt)
-
     def try_mate(self, creatures, nests):
         """Attempt sexual reproduction."""
         if not self.ready_to_mate or not self.alive:
@@ -300,6 +370,9 @@ class Creature:
         my_nest = nests.get_nest(self)
         if not my_nest:
             return None
+        
+        is_decomposer = self.genome.get("is_decomposer", False)
+        best_d = 0
 
         # predators must go home before mating
         if self.genome["aggression"] > 0.6 and not (nests.can_enter(self, my_nest) and my_nest.contains(self)):
@@ -312,36 +385,84 @@ class Creature:
             self.seek(my_nest.x, my_nest.y)
             self.move(1 / FPS)
             return None
-
-
-        partner, best_d = None, 9999
-        for c in creatures:
-            if c is self or not c.alive or not c.ready_to_mate or c.partner:
-                continue
-
-            if nests.is_safe_zone(self, c):
-                d = dist(self.x, self.y, c.x, c.y)
-                if d < best_d and d < self.genome["vision"] * 0.8:
-                    partner, best_d = c, d
         
-        if not nests.can_enter(self, my_nest):
-            return None
+        if is_decomposer:
+            # Decomposers mate only if both are inside the same nest
+            if not my_nest.contains(self):
+                self.seek(my_nest.x, my_nest.y)
+                self.move(1 / FPS)
+                return None
+
+            # Must have a valid living partner
+            if not self.partner or not self.partner.alive:
+                return None
+
+            partner_nest = nests.get_nest(self.partner)
+            # If both inside same decomposer nest, skip partner-search loop below
+            if partner_nest == my_nest and my_nest.contains(self.partner):
+                partner = self.partner
+            else:
+                return None
+
+
+
+        is_predator = self.genome["aggression"] > 0.6
+        # --- PARTNER SELECTION ---
+        is_predator = self.genome["aggression"] > 0.6
+        is_decomposer = self.genome.get("is_decomposer", False)
+        partner = None
+
+        if is_decomposer:
+            # Decomposers always mate with their current partner if valid
+            if self.partner and self.partner.alive and self.partner.ready_to_mate:
+                partner = self.partner
+            else:
+                return None
+        else:
+            partner, best_d = None, 9999
+            for c in creatures:
+                if c is self or not c.alive or not c.ready_to_mate or c.partner:
+                    continue
+                # predators: extended range, same-nest check
+                if is_predator:
+                    if nests.get_nest(c) != my_nest:
+                        continue
+                    d = dist(self.x, self.y, c.x, c.y)
+                    if d < best_d and d < self.genome["vision"] * 1.2:
+                        partner, best_d = c, d
+                else:
+                    # prey: safe-zone restriction
+                    if nests.is_safe_zone(self, c):
+                        d = dist(self.x, self.y, c.x, c.y)
+                        if d < best_d and d < self.genome["vision"] * 0.8:
+                            partner, best_d = c, d
 
         if partner:
-            if best_d > self.radius * 3:
+            # CHANGE: More lenient distance requirement for predators
+            max_dist = self.radius * 4 if is_predator else self.radius * 3
+            
+            if best_d > max_dist:
                 self.seek(partner.x, partner.y)
                 self.move(1 / FPS)
                 return None
 
-            self.energy *= (1 - MATING_COST * 0.8)
-            partner.energy *= (1 - MATING_COST * 0.8)
+            # CHANGE: Lower mating cost for predators
+            cost = MATING_COST * 0.6 if is_predator else MATING_COST * 0.8
+            self.energy *= (1 - cost)
+            partner.energy *= (1 - cost)
             self.ready_to_mate = False
             partner.ready_to_mate = False
 
             child_genome = {}
             for key in self.genome:
+                if key == "is_decomposer":
+                    # Decomposers only breed with decomposers
+                    child_genome[key] = self.genome["is_decomposer"] and partner.genome["is_decomposer"]
+                    continue
+
                 avg_val = (self.genome[key] + partner.genome[key]) / 2
                 mutated = avg_val + random.gauss(0, 0.07)
+
                 if key == "vision":
                     mutated = clamp(mutated, 40, 160)
                 elif key == "speed":
@@ -354,11 +475,14 @@ class Creature:
                     mutated = clamp(mutated, 0.0, 1.0)
                 else:
                     mutated = clamp(mutated, 0.4, 2.0)
+
                 child_genome[key] = mutated
+
 
             cx = (self.x + partner.x) / 2 + random.uniform(-30, 30)
             cy = (self.y + partner.y) / 2 + random.uniform(-30, 30)
             child = Creature(cx, cy, genome=child_genome)
+            child.genome["is_decomposer"] = self.genome.get("is_decomposer", False)
             child.energy = child.energy_max * random.uniform(0.7, 0.9)
             child.flash_timer = 0.6
             child.birth_flash = True
@@ -378,17 +502,76 @@ class Creature:
             partner.responding = False
             self.mate_drive = 0.0
             partner.mate_drive = 0.0
+            self.ready_to_mate = False
+            partner.ready_to_mate = False
+            self.call_cooldown = 2.0
+            partner.call_cooldown = 2.0
+            self.mate_drive = 0.0
+            partner.mate_drive = 0.0
+
+
+
 
             return child
 
+        # Reset partner if we're decomposers and got stuck
+        if self.genome.get("is_decomposer", False) and self.partner:
+            if not self.partner.alive or random.random() < 0.01:
+                self.partner.partner = None
+                self.partner = None
+                self.heard_call = None
         return None
 
+
     # ==================================================
-    #   PREDATOR BEHAVIOR (with scent tracking)
+    #   PREDATOR BEHAVIOR
     # ==================================================
     def predator_behavior(self, dt, creatures, foods, nests, scent_field, generation):
-        prey = self.find_prey(creatures, nests)
         hunger = self.energy / self.energy_max
+        
+        # NEW: Check if in hibernation mode
+        in_hibernation = self.energy <= self.energy_max * 0.2
+        
+        if in_hibernation:
+            # In hibernation - only hunt if prey comes within vision range
+            prey = self.find_prey(creatures, nests, scent_field)
+            
+            if prey:
+                # Prey spotted! Wake up and hunt
+                prey_nest = nests.get_nest(prey)
+                # Don't chase if prey is in protected nest
+                if prey_nest and not nests.can_enter(self, prey_nest) and prey_nest.contains(prey):
+                    # Just stand still if can't reach prey
+                    self.vx *= 0.05  # Almost completely still
+                    self.vy *= 0.05
+                    self.move(dt, nests)
+                    return generation
+                
+                # Chase the prey
+                self.seek(prey.x, prey.y)
+                d = dist(self.x, self.y, prey.x, prey.y)
+                
+                # Try to eat if close enough
+                if d <= (self.radius + prey.radius):
+                    if not nests.is_safe_zone(self, prey):
+                        prey.alive = False
+                        # Eating wakes us up from hibernation
+                        instant_gain = PREDATION_GAIN * 0.25
+                        self.energy = clamp(self.energy + instant_gain, 0, self.energy_max)
+                        self.flash_timer = 0.3
+                        self.digest_timer = 10.0
+                
+                self.move(dt, nests)
+                return generation
+            else:
+                # No prey in vision - stand completely still to conserve energy
+                self.vx *= 0.05  # Almost completely still
+                self.vy *= 0.05
+                self.move(dt, nests)
+                return generation
+        
+        # Normal (non-hibernation) hunting behavior below
+        prey = self.find_prey(creatures, nests, scent_field)
 
         # try scent trail if no visible prey
         if not prey:
@@ -398,7 +581,7 @@ class Creature:
                 self.vx += gx * 2.0
                 self.vy += gy * 2.0
                 self.vx, self.vy = norm(self.vx, self.vy)
-                self.move(dt)
+                self.move(dt, nests)
                 return generation
 
         # === normal visual hunting ===
@@ -409,7 +592,7 @@ class Creature:
                 # break off pursuit, wander or re-evaluate
                 self.target_prey = None
                 self.wander(dt)
-                self.move(dt)
+                self.move(dt, nests)
                 return generation
 
             # normal pursuit
@@ -424,10 +607,12 @@ class Creature:
                     self.flash_timer = 0.3
                     self.digest_timer = 10.0  # longer digestion = more energy over time
 
+            # CHANGE: Lower energy threshold for mating readiness
+            if self.energy >= self.energy_max * MATING_ENERGY_REQ and not self.partner:
+                # ready to mate again only when single and full
+                self.ready_to_mate = True
 
-
-
-            self.move(dt)
+            self.move(dt, nests)
         elif hunger < 0.5:
             food = self.find_nearest_food(foods)
             if food and dist(self.x, self.y, food.x, food.y) < self.genome["vision"]:
@@ -437,10 +622,10 @@ class Creature:
                     self.energy = clamp(self.energy + ENERGY_DELIVERY_REWARD * 0.5, 0, self.energy_max)
                     self.flash_timer = 0.2
                     self.digest_timer = 1.5
-            self.move(dt)
+            self.move(dt, nests)
         else:
             self.wander(dt)
-            self.move(dt)
+            self.move(dt, nests)
         return generation
 
     # ==================================================
@@ -467,7 +652,7 @@ class Creature:
             self.vx = 0.8 * self.vx + 0.2 * nx
             self.vy = 0.8 * self.vy + 0.2 * ny
             self.vx, self.vy = norm(self.vx, self.vy)
-            self.move(dt)
+            self.move(dt, nests)
         else:
             # look for food scent if not fleeing
             grad = scent_field.sample_gradient(self.x, self.y, "food")
@@ -477,20 +662,143 @@ class Creature:
                 self.vy += gy * 0.5
                 self.vx, self.vy = norm(self.vx, self.vy)
             self.standard_food_cycle(dt, foods, nests)
-            self.move(dt)
+            self.move(dt, nests)
+
+    # ==================================================
+    #   DECOMPOSER BEHAVIOR
+    # ==================================================
+    def decomposer_behavior(self, dt, corpses, foods, nests, scent_field):
+        """Decomposer-specific behavior: find and consume corpses, poop plants."""
+        # Check if we need to release toxin
+        if self.priorities.get("escape", 0) > TOXIN_THRESHOLD and self.toxin_cooldown <= 0:
+            self.release_toxin(scent_field)
+            self.toxin_cooldown = TOXIN_DURATION
+        
+        # Find nearest corpse
+        target_corpse = self.find_nearest_corpse(corpses)
+
+        # Follow scent if no corpse directly visible
+        if not target_corpse:
+            grad = scent_field.sample_gradient(self.x, self.y, "corpse")
+            if grad:
+                gx, gy = grad
+                self.vx += gx * 2.5
+                self.vy += gy * 2.5
+                self.vx, self.vy = norm(self.vx, self.vy)
+                self.move(dt, nests)
+                return
+
+        
+        if target_corpse:
+            d = dist(self.x, self.y, target_corpse.x, target_corpse.y)
+            
+            if d < self.genome["vision"]:
+                self.seek(target_corpse.x, target_corpse.y)
+                
+                # If close enough, consume
+                if d <= (self.radius + target_corpse.radius):
+                    # Calculate how much we can eat
+                    space_available = self.energy_max - self.energy
+                    consumed = target_corpse.consume(space_available)
+                    self.energy = clamp(self.energy + consumed, 0, self.energy_max)
+                    self.flash_timer = 0.2
+                    
+                    # Poop out plants based on consumption
+                    self.digest_and_poop(consumed, foods)
+
+                    # Remove corpse if fully eaten
+                    if not target_corpse.alive or target_corpse.energy <= 0:
+                        corpses.remove(target_corpse)
+                    
+                    if self.energy >= self.energy_max * MATING_ENERGY_REQ:
+                        self.ready_to_mate = True
+        else:
+            # No corpses, just wander
+            self.wander(dt)
+        
+        self.move(dt, nests)
+
+    def release_toxin(self, scent_field):
+        """Release toxin cloud to deter predators."""
+        strength = self.genome.get("toxin", 0.5) * TOXIN_STRENGTH
+        scent_field.emit(self.x, self.y, "toxin", strength)
+        self.flash_timer = 0.3
+
+    def decomposer_escape(self, dt, creatures, nests, scent_field):
+        """Decomposer escape behavior - release toxin and flee."""
+        predator = self.find_predator(creatures, nests)
+        
+        if predator:
+            # Release toxin if possible
+            if self.toxin_cooldown <= 0:
+                self.release_toxin(scent_field)
+                self.toxin_cooldown = TOXIN_DURATION
+            
+            # Flee
+            dx = self.x - predator.x
+            dy = self.y - predator.y
+            nx, ny = norm(dx, dy)
+            self.vx = 0.9 * self.vx + 0.1 * nx
+            self.vy = 0.9 * self.vy + 0.1 * ny
+            self.vx, self.vy = norm(self.vx, self.vy)
+        
+        self.move(dt, nests)
+
+    
+    def digest_and_poop(self, consumed_energy, foods):
+        """Convert consumed corpse energy into plant food."""
+        remaining = consumed_energy
+        
+        while remaining >= PLANT_SPAWN_ENERGY * 0.3:  # Minimum 30% plant
+            if remaining >= PLANT_SPAWN_ENERGY:
+                # Full plant
+                plant_energy = PLANT_SPAWN_ENERGY
+            else:
+                # Partial plant
+                plant_energy = remaining
+            
+            # Spawn plant behind the decomposer
+            angle = random.uniform(0, math.tau)
+            offset = self.radius + FOOD_RADIUS + 5
+            px = self.x + math.cos(angle) * offset
+            py = self.y + math.sin(angle) * offset
+            
+            # Clamp to screen bounds
+            px = clamp(px, 20, WIDTH - 20)
+            py = clamp(py, 20, HEIGHT - 20)
+            
+            new_plant = Food(px, py)
+            new_plant.energy = plant_energy  # Store energy value
+            foods.append(new_plant)
+            
+            remaining -= plant_energy
+    
+    def find_nearest_corpse(self, corpses):
+        """Find nearest corpse with remaining energy."""
+        best, best_d = None, 1e9
+        for corpse in corpses:
+            if not corpse.alive:
+                continue
+            d = (self.x - corpse.x) ** 2 + (self.y - corpse.y) ** 2
+            if d < best_d and d < (self.genome["vision"] * 2) ** 2:
+                best_d, best = d, corpse
+        return best
+
 
     def neutral_behavior(self, dt, foods, nests):
         """Default idle behavior."""
         if self.genome["aggression"] > 0.6:
             self.wander(dt)
-            self.move(dt)
+            self.move(dt, nests)
             return
         self.standard_food_cycle(dt, foods, nests)
-        self.move(dt)
+        self.move(dt, nests)
 
     def standard_food_cycle(self, dt, foods, nests, generation=None):
         """Standard foraging behavior."""
         my_nest = nests.get_nest(self)
+        if self.genome.get("is_decomposer", False):
+            return  # Skip food logic for decomposers
         if self.carrying:
             if my_nest:
                 self.seek(my_nest.x, my_nest.y)
@@ -501,11 +809,15 @@ class Creature:
                     self.ready_to_mate = self.energy >= self.energy_max * MATING_ENERGY_REQ
                     if RESPAWN_FOOD_ON_DELIVER:
                         foods.append(Food(*rand_point()))
-            self.move(dt)
+            self.move(dt, nests)
             return
 
         if not self.target_food or not self.target_food.alive:
             self.target_food = self.find_nearest_food(foods)
+        else:
+            # Keep targeting same food even if far away
+            if dist(self.x, self.y, self.target_food.x, self.target_food.y) > self.genome["vision"] * 1.5:
+                self.target_food = None
 
         if self.target_food and self.target_food.alive:
             d = dist(self.x, self.y, self.target_food.x, self.target_food.y)
@@ -515,18 +827,23 @@ class Creature:
                 self.carrying = True
                 self.target_food.alive = False
                 self.target_food = None
-        else:
-            self.wander_t = 0
-            self.wander(dt)
         if self.genome["aggression"] <= 0.6:
             self.digest_timer = 0  # instant digestion for herbivores
-        self.move(dt)
+        self.move(dt, nests)
 
-    def move(self, dt):
+    def move(self, dt, nests=None):
         """Move creature and handle boundary collision."""
         step = self.speed * dt
-        self.x += self.vx * step
-        self.y += self.vy * step
+        new_x = self.x + self.vx * step
+        new_y = self.y + self.vy * step
+        
+        # Check wall collisions if nests provided
+        if nests:
+            new_x, new_y = nests.check_wall_collision(self, new_x, new_y)
+        
+        self.x = new_x
+        self.y = new_y
+        
         bounced = False
         if self.x < 0 or self.x > WIDTH:
             self.vx *= -1
@@ -539,8 +856,8 @@ class Creature:
         if bounced:
             self.vx, self.vy = norm(self.vx, self.vy)
 
-    def find_prey(self, creatures, nests):
-        """Find nearest vulnerable prey."""
+    def find_prey(self, creatures, nests, scent_field=None):
+        """Find nearest vulnerable prey, avoiding toxin."""
         best, best_d = None, 1e9
         for c in creatures:
             if c is self or not c.alive:
@@ -549,6 +866,14 @@ class Creature:
                 continue
             if c.genome["size"] * PREDATION_SIZE_RATIO < self.genome["size"]:
                 d = dist(self.x, self.y, c.x, c.y)
+                
+                # NEW: Check for toxin scent near prey
+                if scent_field:
+                    grad = scent_field.sample_gradient(c.x, c.y, "toxin")
+                    if grad:
+                        # Skip this prey if there's toxin nearby
+                        continue
+                
                 if d < self.genome["vision"] and d < best_d:
                     best_d, best = d, c
         return best
@@ -567,12 +892,14 @@ class Creature:
 
     def find_nearest_food(self, foods):
         """Find nearest available food."""
+        if self.genome.get("is_decomposer", False):
+            return None  # Decomposers never target plants
         best, best_d = None, 1e9
         for f in foods:
             if not f.alive:
                 continue
             d = (self.x - f.x) ** 2 + (self.y - f.y) ** 2
-            if d < best_d:
+            if d < best_d and d < (self.genome["vision"] * 2) ** 2:
                 best_d, best = d, f
         return best
 
@@ -608,8 +935,16 @@ class Creature:
             pygame.draw.circle(ring, (255, 100, 80, digest_alpha), (int(self.x), int(self.y)), int(self.radius + 5), 2)
             surf.blit(ring, (0, 0))
 
-        hue = self.genome["aggression"]
-        color = (int(52 + hue * 180), int(122 - hue * 80), int(235 - hue * 200))
+        # MOVED: Set decomposer color FIRST
+        if self.genome.get("is_decomposer", False):
+            color = (int(120 + self.genome["size"] * 40), 
+                    int(90 + self.genome["size"] * 30), 
+                    int(60 + self.genome["size"] * 20))
+        else:
+            hue = self.genome["aggression"]
+            color = (int(52 + hue * 180), int(122 - hue * 80), int(235 - hue * 200))
+        
+        # Then handle flash_timer
         if self.flash_timer > 0:
             if hasattr(self, "flash_color"):
                 color = self.flash_color
@@ -623,6 +958,11 @@ class Creature:
             color = (245, 190, 30)
         if hasattr(self, "birth_flash") and self.flash_timer <= 0:
             self.birth_flash = False
+        if self.genome.get("is_decomposer", False):
+            # Decomposers are brownish
+            color = (int(120 + self.genome["size"] * 40), 
+                     int(90 + self.genome["size"] * 30), 
+                     int(60 + self.genome["size"] * 20))
 
         pygame.draw.circle(surf, color, (int(self.x), int(self.y)), int(self.radius))
         hx = self.x + self.vx * (self.radius + 4)
@@ -644,10 +984,12 @@ class Creature:
         # mating call visualization
         if self.calling:
             t = 1 - (self.call_timer / CALL_DURATION)
-            call_range = 350 * (self.genome["vision"] / 100)
+            # CHANGE: Different call ranges for predators
+            is_predator = self.genome["aggression"] > 0.5
+            call_range = 450 * (self.genome["vision"] / 100) if is_predator else 350 * (self.genome["vision"] / 100)
             pulse_radius = int(self.radius + t * call_range)
             alpha = max(0, 255 - int(t * 255))
-            call_color = (255, 80, 80) if self.genome["aggression"] > 0.5 else (100, 255, 100)
+            call_color = (255, 80, 80) if is_predator else (100, 255, 100)
             ring_surface = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             pygame.draw.circle(ring_surface, (*call_color, alpha), (int(self.x), int(self.y)), pulse_radius, 2)
             surf.blit(ring_surface, (0, 0))

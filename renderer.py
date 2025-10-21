@@ -30,6 +30,8 @@ def draw_scent_field(screen, scent_field):
         "pred": (255, 60, 60),    # strong red glow for predators
         "prey": (80, 255, 120),   # green for prey
         "food": (255, 230, 90),   # yellowish for food
+        "toxin": (150, 60, 200),  # purple for toxin
+        "corpse": (200, 100, 255),  # purply glow for corpse
     }
 
     for scent_type, color in colors.items():
@@ -76,11 +78,13 @@ def draw_hud(surf, font, creatures, foods, generation, hud_flash_timer):
     max_gen = max((c.generation for c in creatures if c.alive), default=0)
 
     hud_lines = [
-        f"Creatures: {alive}/{len(creatures)}",
-        f"Food: {sum(1 for f in foods if f.alive)}",
-        f"Generation: {max_gen}",
-        f"Avg Energy: {avg_e:5.1f}",
-        "L-click: select   R-click: pause   Esc/Q: quit",
+    f"Creatures: {alive}/{len(creatures)}",
+    f"Food: {sum(1 for f in foods if f.alive)}",
+    f"Generation: {max_gen}",
+    f"Avg Energy: {avg_e:5.1f}",
+    "L-click: add food   Esc/Q: quit",
+    "Right-click or Space: pause/resume",
+    "Press F: toggle fullscreen",
     ]
 
     for i, text in enumerate(hud_lines):
@@ -92,6 +96,30 @@ def draw_hud(surf, font, creatures, foods, generation, hud_flash_timer):
             surf.blit(font.render(text, True, HUD_COLOR), (12, 10 + i * 20))
 
     return max_gen
+
+def draw_corpses(surf, corpses):
+    """Draw corpse bodies with energy bars."""
+    for corpse in corpses:
+        if not corpse.alive:
+            continue
+        
+        # Draw corpse body (gray)
+        pygame.draw.circle(surf, (80, 80, 80), 
+                          (int(corpse.x), int(corpse.y)), 
+                          int(corpse.radius))
+        
+        # Draw energy bar above corpse
+        w, h = 20, 4
+        pct = corpse.energy / corpse.max_energy
+        bx = int(corpse.x - w // 2)
+        by = int(corpse.y - corpse.radius - 10)
+        
+        # Background
+        pygame.draw.rect(surf, (30, 30, 30), pygame.Rect(bx, by, w, h))
+        # Energy remaining
+        if pct > 0:
+            pygame.draw.rect(surf, (100, 200, 100), 
+                           pygame.Rect(bx, by, int(w * pct), h))
 
 
 def draw_creature_info(surf, font, creature):
