@@ -62,6 +62,8 @@ Every run evolves differently — no two deserts stabilize the same way.
 ```bash
 pip install pygame
 python main.py
+```
+
 
 Use right-click to pause, left-click to inspect creatures, and watch their live priorities (hunger, fear, mating) update in real time.
 
@@ -70,4 +72,3 @@ Future Goals
 - AI-driven adaptation memory
 - Weather and seasonal energy cycles
 - Exportable evolution data for analytics
-
