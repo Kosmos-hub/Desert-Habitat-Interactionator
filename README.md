@@ -5,10 +5,11 @@ The world isn’t coded to behave — it **emerges** from the rules of energy, h
 
 ---
 
-##  Overview     ╱|、
-##              (˚ˎ。7  
-##               |、˜〵          
-##               じしˍ,)ノ
+##  Overview     
+               ╱|、
+              (˚ˎ。7  
+               |、˜〵          
+               じしˍ,)ノ
 In this simulation, autonomous organisms interact in a delicate desert environment.  
 Each species has its own motivations and biological limits, shaping a dynamic ecosystem through:
 - **Competition** for food and survival  
@@ -32,9 +33,10 @@ No creature is directly scripted — their choices come from evolving genetics a
 
 ---
 
-##  Key Parameters                          /\_/\
-##                                       = (• . •) =
-##                                         /     \     
+##  Key Parameters                        
+                                          /\_/\
+                                       = (• . •) =
+                                         /     \     
 - **Size** → affects digestion, energy storage, and visibility  
 - **Speed** → determines agility and energy cost per movement  
 - **Vision** → defines awareness radius and hunting efficiency  
